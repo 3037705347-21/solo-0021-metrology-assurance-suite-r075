@@ -154,16 +154,17 @@ func (m *Mutation) Deployments(deviceID string) []domain.DeviceDeployment {
 	return append([]domain.DeviceDeployment(nil), m.deployments[deviceID]...)
 }
 
-// CurrentRoom reports the room the device is currently deployed to.
+// CurrentRoom reports the room the device is in at this point in the
+// mutation: the room recorded by its most recent deployment, falling back
+// to the device record when there is no deployment history.
 func (m *Mutation) CurrentRoom(deviceID string) string {
-	items := m.deployments[deviceID]
-	if len(items) == 0 {
-		if device, exists := m.devices[deviceID]; exists {
-			return device.Room
-		}
-		return ""
+	if items := m.deployments[deviceID]; len(items) > 0 {
+		return items[len(items)-1].Room
 	}
-	return items[0].Room
+	if device, exists := m.devices[deviceID]; exists {
+		return device.Room
+	}
+	return ""
 }
 
 func (m *Mutation) Case(id string) (domain.VerificationCase, bool) {

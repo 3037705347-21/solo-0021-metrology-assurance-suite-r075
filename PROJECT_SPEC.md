@@ -58,7 +58,21 @@ The steward sends `POST /cases/{id}/reopen` after an out-of-tolerance result.
 Only `recheck_required` cases may move back to `awaiting_measurement`. The
 service records the actor and reason in the audit trail.
 
-### 5. Seal Verification
+### 5. Relocate Device
+
+The steward sends `POST /devices/{id}/deployments` with the target room,
+actor, and reason. The service rejects incomplete input, inactive devices,
+and relocations to the room the device already occupies. A valid relocation
+updates the device's current room, appends a deployment record, and appends
+the `device_relocated` audit event in one atomic repository commit. A
+rejected request leaves no state behind, so resubmitting with corrected
+information succeeds.
+
+Relocations affect only later measurements: every measurement stores the
+room that was valid when it was submitted, and subsequent relocations never
+rewrite recorded or sealed measurement rooms.
+
+### 6. Seal Verification
 
 The verifier sends `POST /cases/{id}/seal` after an accepted measurement. Only
 `review_ready` cases may be sealed. The service selects the accepted
@@ -88,6 +102,11 @@ Required invariants:
 - A tolerance must be positive.
 - A case can have at most one evidence seal.
 - A sealed case cannot accept measurements, reopen, or seal again.
+- Every measurement records the room valid on its device at submission time;
+  that room never changes after the measurement is recorded.
+- A device relocation is one atomic commit: device room, deployment record,
+  and audit event land together or not at all. A rejected relocation leaves
+  no trace and can be resubmitted with corrected information.
 - Every mutation that changes a case also appends an audit event in the same
   repository commit.
 
@@ -107,6 +126,8 @@ Required invariants:
 - `GET /healthz`
 - `POST /devices`
 - `GET /devices/{id}`
+- `POST /devices/{id}/deployments`
+- `GET /devices/{id}/deployments`
 - `POST /cases`
 - `GET /cases/{id}`
 - `POST /cases/{id}/measurements`

@@ -95,7 +95,12 @@ func (s *Service) RecordDeployment(ctx context.Context, deviceID string, input c
 	var result contracts.DeviceDeploymentResponse
 	id := strings.TrimSpace(deviceID)
 	room := strings.TrimSpace(input.Room)
+	actor := strings.TrimSpace(input.Actor)
+	reason := strings.TrimSpace(input.Reason)
 	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {
+		if room == "" || actor == "" || reason == "" {
+			return fmt.Errorf("%w: room, actor, and reason are required", domain.ErrInvalidInput)
+		}
 		device, exists := m.Device(id)
 		if !exists {
 			return fmt.Errorf("%w: device %s", domain.ErrNotFound, id)
@@ -103,11 +108,20 @@ func (s *Service) RecordDeployment(ctx context.Context, deviceID string, input c
 		if !device.IsActive() {
 			return fmt.Errorf("%w: device %s is %s", domain.ErrStateConflict, device.ID, device.Status)
 		}
-		if room == "" {
-			return fmt.Errorf("%w: target room is required", domain.ErrInvalidInput)
-		}
 		if room == device.Room {
 			return fmt.Errorf("%w: device is already in room %s", domain.ErrStateConflict, room)
+		}
+		now := s.now()
+		deployment, err := domain.NewDeviceDeployment(
+			m.NextID("deployment"),
+			device.ID,
+			room,
+			actor,
+			reason,
+			now,
+		)
+		if err != nil {
+			return err
 		}
 		if err := device.Relocate(room); err != nil {
 			return err
@@ -115,49 +129,27 @@ func (s *Service) RecordDeployment(ctx context.Context, deviceID string, input c
 		if err := m.UpdateDevice(device); err != nil {
 			return err
 		}
-		deployment := domain.DeviceDeployment{
-			ID:         m.NextID("deployment"),
-			DeviceID:   device.ID,
-			Room:       room,
-			Actor:      strings.TrimSpace(input.Actor),
-			Reason:     strings.TrimSpace(input.Reason),
-			RecordedAt: s.now(),
-		}
 		if err := m.AppendDeployment(deployment); err != nil {
 			return err
-		}
-		result = contracts.DeviceDeploymentResponse{Device: device, Deployment: deployment}
-		return nil
-	})
-	if err != nil {
-		return contracts.DeviceDeploymentResponse{}, err
-	}
-	err = s.repository.Mutate(ctx, func(m *repository.Mutation) error {
-		actor := strings.TrimSpace(input.Actor)
-		reason := strings.TrimSpace(input.Reason)
-		if actor == "" || reason == "" {
-			return fmt.Errorf("%w: actor and reason are required", domain.ErrInvalidInput)
 		}
 		event, err := domain.NewAuditEvent(
 			m.NextID("event"),
 			"device",
-			id,
+			device.ID,
 			"",
 			"device_relocated",
 			actor,
 			reason,
-			s.now(),
+			now,
 		)
 		if err != nil {
 			return err
 		}
 		m.AppendEvent(event)
+		result = contracts.DeviceDeploymentResponse{Device: device, Deployment: deployment}
 		return nil
 	})
-	if err != nil {
-		return contracts.DeviceDeploymentResponse{}, err
-	}
-	return result, nil
+	return result, err
 }
 
 func (s *Service) Deployments(ctx context.Context, deviceID string) ([]domain.DeviceDeployment, error) {
@@ -417,11 +409,6 @@ func caseResponseFromSnapshot(snapshot repository.Snapshot, item domain.Verifica
 		Case:         item,
 		Measurements: snapshot.Measurements(item.ID),
 		Events:       snapshot.Events(item.ID),
-	}
-	if device, exists := snapshot.Device(item.DeviceID); exists {
-		for index := range result.Measurements {
-			result.Measurements[index].Room = device.Room
-		}
 	}
 	if seal, exists := snapshot.Seal(item.ID); exists {
 		result.Seal = &seal
