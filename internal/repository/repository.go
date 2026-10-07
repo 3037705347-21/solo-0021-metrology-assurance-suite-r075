@@ -154,16 +154,18 @@ func (m *Mutation) Deployments(deviceID string) []domain.DeviceDeployment {
 	return append([]domain.DeviceDeployment(nil), m.deployments[deviceID]...)
 }
 
-// CurrentRoom reports the room the device is currently deployed to.
+// CurrentRoom reports the room the device is currently deployed to. It is the
+// room recorded on the most recent successful deployment, which is the room
+// in effect at the moment a new measurement is committed.
 func (m *Mutation) CurrentRoom(deviceID string) string {
 	items := m.deployments[deviceID]
-	if len(items) == 0 {
-		if device, exists := m.devices[deviceID]; exists {
-			return device.Room
-		}
-		return ""
+	if len(items) > 0 {
+		return items[len(items)-1].Room
 	}
-	return items[0].Room
+	if device, exists := m.devices[deviceID]; exists {
+		return device.Room
+	}
+	return ""
 }
 
 func (m *Mutation) Case(id string) (domain.VerificationCase, bool) {

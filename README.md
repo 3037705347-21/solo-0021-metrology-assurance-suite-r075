@@ -18,6 +18,7 @@ The service listens on `127.0.0.1:18121` by default.
 ```bash
 go build ./...
 go run ./cmd/workflowcheck --workflow register-device
+go run ./cmd/workflowcheck --workflow relocate-device
 go run ./cmd/workflowcheck --workflow open-verification-case
 go run ./cmd/workflowcheck --workflow record-measurement
 go run ./cmd/workflowcheck --workflow reopen-verification-case
@@ -26,6 +27,12 @@ go run ./cmd/workflowcheck --workflow seal-verification
 
 The workflow runner starts a fresh in-process HTTP service and exercises the
 public API. It is a production smoke command, not a unit test.
+
+Each measurement pins the room the device was in when the measurement was
+submitted. A successful relocation (`POST /devices/{id}/deployments`) updates
+the device room for later measurements only; recorded and sealed measurements
+keep their original room. A relocation rejected for a missing room, actor, or
+reason commits nothing, so the corrected request resubmits cleanly.
 
 Tests are intentionally deferred for this initialization baseline. The later
 engineering-task stage will add the unit and integration test suite and replace
@@ -36,6 +43,8 @@ or extend these smoke checks with red/green verification tests.
 - `GET /healthz`
 - `POST /devices`
 - `GET /devices/{id}`
+- `POST /devices/{id}/deployments`
+- `GET /devices/{id}/deployments`
 - `POST /cases`
 - `GET /cases/{id}`
 - `POST /cases/{id}/measurements`

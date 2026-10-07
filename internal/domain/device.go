@@ -80,7 +80,11 @@ func (d *Device) Relocate(room string) error {
 	if d.Status != DeviceActive {
 		return fmt.Errorf("%w: only an active device can be relocated", ErrStateConflict)
 	}
-	d.Room = strings.TrimSpace(room)
+	target := strings.TrimSpace(room)
+	if target == "" {
+		return fmt.Errorf("%w: target room is required", ErrInvalidInput)
+	}
+	d.Room = target
 	return nil
 }
 

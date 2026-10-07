@@ -40,6 +40,7 @@ func main() {
 		"record-measurement":       checkRecordMeasurement,
 		"reopen-verification-case": checkReopenVerificationCase,
 		"seal-verification":        checkSealVerification,
+		"relocate-device":          checkRelocateDevice,
 	}
 	run, ok := checks[*workflow]
 	if !ok {
@@ -375,6 +376,168 @@ func checkSealVerification() error {
 	return nil
 }
 
+func checkRelocateDevice() error {
+	h := newHarness()
+	defer h.close()
+
+	// Device enrolled in Room A; a measurement is recorded there and sealed.
+	deviceID, err := h.createDevice("MET-1501")
+	if err != nil {
+		return err
+	}
+	opened, err := h.openCase(deviceID)
+	if err != nil {
+		return err
+	}
+	caseID, err := nestedString(opened.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+	first, err := h.recordMeasurement(caseID, 25.2, "Rui")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(first, http.StatusCreated); err != nil {
+		return err
+	}
+	firstRoom, err := nestedStringPath(first.Body, "measurements", 0, "room")
+	if err != nil {
+		return err
+	}
+	if firstRoom != "Room A" {
+		return fmt.Errorf("first measurement room = %q, expected Room A", firstRoom)
+	}
+	sealed, err := h.request(http.MethodPost, "/cases/"+caseID+"/seal", map[string]any{
+		"reviewer": "Nora",
+		"summary":  "sealed while in Room A",
+	})
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(sealed, http.StatusCreated); err != nil {
+		return err
+	}
+
+	// A relocation rejected for incomplete information must leave no trace:
+	// the device keeps its room, no deployment is appended, and no event is
+	// recorded. A correct retry must then succeed.
+	invalid, err := h.relocate(deviceID, "Room B", "Lin", "")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(invalid, http.StatusBadRequest); err != nil {
+		return err
+	}
+	if err := expectErrorCode(invalid, "invalid_input"); err != nil {
+		return err
+	}
+
+	read, err := h.request(http.MethodGet, "/devices/"+deviceID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(read, http.StatusOK); err != nil {
+		return err
+	}
+	roomAfterReject, err := nestedString(read.Body, "device", "room")
+	if err != nil {
+		return err
+	}
+	if roomAfterReject != "Room A" {
+		return fmt.Errorf("rejected relocation changed device room to %q", roomAfterReject)
+	}
+	deployments, err := h.request(http.MethodGet, "/devices/"+deviceID+"/deployments", nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(deployments, http.StatusOK); err != nil {
+		return err
+	}
+	deploymentList, err := nestedSlice(deployments.Body, "deployments")
+	if err != nil {
+		return err
+	}
+	if len(deploymentList) != 1 {
+		return fmt.Errorf("rejected relocation left %d deployments, expected only the enrollment record", len(deploymentList))
+	}
+
+	// Correct resubmission must not collide with the failed attempt.
+	moved, err := h.relocate(deviceID, "Room B", "Lin", "moved instrument to calibration bay")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(moved, http.StatusCreated); err != nil {
+		return err
+	}
+	movedRoom, err := nestedString(moved.Body, "device", "room")
+	if err != nil {
+		return err
+	}
+	if movedRoom != "Room B" {
+		return fmt.Errorf("successful relocation room = %q, expected Room B", movedRoom)
+	}
+	movedEvent, err := nestedString(moved.Body, "deployment", "room")
+	if err != nil {
+		return err
+	}
+	if movedEvent != "Room B" {
+		return fmt.Errorf("relocation deployment room = %q, expected Room B", movedEvent)
+	}
+
+	// A relocation to the current room is a conflict, not an accepted move.
+	sameRoom, err := h.relocate(deviceID, "Room B", "Lin", "duplicate move")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(sameRoom, http.StatusConflict); err != nil {
+		return err
+	}
+	if err := expectErrorCode(sameRoom, "state_conflict"); err != nil {
+		return err
+	}
+
+	// Historical (sealed) evidence keeps the room recorded at submission time.
+	caseRead, err := h.request(http.MethodGet, "/cases/"+caseID, nil)
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(caseRead, http.StatusOK); err != nil {
+		return err
+	}
+	historicalRoom, err := nestedStringPath(caseRead.Body, "measurements", 0, "room")
+	if err != nil {
+		return err
+	}
+	if historicalRoom != "Room A" {
+		return fmt.Errorf("sealed measurement was retroactively changed to %q", historicalRoom)
+	}
+
+	// After the move, a newly opened case records measurements in Room B.
+	secondCase, err := h.openCase(deviceID)
+	if err != nil {
+		return err
+	}
+	secondID, err := nestedString(secondCase.Body, "case", "id")
+	if err != nil {
+		return err
+	}
+	secondMeasurement, err := h.recordMeasurement(secondID, 25.1, "Rui")
+	if err != nil {
+		return err
+	}
+	if err := expectStatus(secondMeasurement, http.StatusCreated); err != nil {
+		return err
+	}
+	secondRoom, err := nestedStringPath(secondMeasurement.Body, "measurements", 0, "room")
+	if err != nil {
+		return err
+	}
+	if secondRoom != "Room B" {
+		return fmt.Errorf("post-relocation measurement room = %q, expected Room B", secondRoom)
+	}
+	return nil
+}
+
 func newHarness() *harness {
 	server := httptest.NewServer(bootstrap.NewHandler())
 	return &harness{
@@ -463,6 +626,14 @@ func (h *harness) recordMeasurement(caseID string, observed float64, technician 
 	})
 }
 
+func (h *harness) relocate(deviceID, room, actor, reason string) (apiResponse, error) {
+	return h.request(http.MethodPost, "/devices/"+deviceID+"/deployments", map[string]any{
+		"room":   room,
+		"actor":  actor,
+		"reason": reason,
+	})
+}
+
 func (h *harness) rejectedCase(tag string) (string, error) {
 	deviceID, err := h.createDevice(tag)
 	if err != nil {
@@ -535,6 +706,18 @@ func nestedString(root map[string]any, path ...string) (string, error) {
 	text, ok := value.(string)
 	if !ok {
 		return "", fmt.Errorf("%s is not a string", strings.Join(path, "."))
+	}
+	return text, nil
+}
+
+func nestedStringPath(root map[string]any, path ...any) (string, error) {
+	value, err := nestedAny(root, path...)
+	if err != nil {
+		return "", err
+	}
+	text, ok := value.(string)
+	if !ok {
+		return "", fmt.Errorf("%v is not a string", path)
 	}
 	return text, nil
 }

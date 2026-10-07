@@ -69,6 +69,28 @@
       ]
     },
     {
+      "id": "relocate-device",
+      "name": "Relocate device",
+      "entry": "POST /devices/{id}/deployments",
+      "steps": [
+        "verify the device exists, is active, and that room, actor, and reason are present",
+        "reject a move to the current room and validate everything before mutating",
+        "commit the new room, deployment record, and device_relocated audit event atomically"
+      ],
+      "success": "returns the device in the new room with one deployment record",
+      "failure": "returns not-found, validation, or state-conflict errors without changing any state",
+      "verification": "workflowcheck rejects an incomplete relocation with no trace, completes a corrected resubmission, and checks that later measurements use the new room while sealed ones keep theirs",
+      "module_ids": [
+        "runtimecheck",
+        "httpapi",
+        "assurance",
+        "domain",
+        "repository",
+        "contracts",
+        "bootstrap"
+      ]
+    },
+    {
       "id": "open-verification-case",
       "name": "Open verification case",
       "entry": "POST /cases",

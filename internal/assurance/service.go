@@ -95,6 +95,8 @@ func (s *Service) RecordDeployment(ctx context.Context, deviceID string, input c
 	var result contracts.DeviceDeploymentResponse
 	id := strings.TrimSpace(deviceID)
 	room := strings.TrimSpace(input.Room)
+	actor := strings.TrimSpace(input.Actor)
+	reason := strings.TrimSpace(input.Reason)
 	err := s.repository.Mutate(ctx, func(m *repository.Mutation) error {
 		device, exists := m.Device(id)
 		if !exists {
@@ -106,52 +108,48 @@ func (s *Service) RecordDeployment(ctx context.Context, deviceID string, input c
 		if room == "" {
 			return fmt.Errorf("%w: target room is required", domain.ErrInvalidInput)
 		}
+		if actor == "" || reason == "" {
+			return fmt.Errorf("%w: actor and reason are required", domain.ErrInvalidInput)
+		}
 		if room == device.Room {
 			return fmt.Errorf("%w: device is already in room %s", domain.ErrStateConflict, room)
 		}
+		now := s.now()
 		if err := device.Relocate(room); err != nil {
+			return err
+		}
+		deployment, err := domain.NewDeviceDeployment(
+			m.NextID("deployment"),
+			device.ID,
+			room,
+			actor,
+			reason,
+			now,
+		)
+		if err != nil {
+			return err
+		}
+		event, err := domain.NewAuditEvent(
+			m.NextID("event"),
+			"device",
+			device.ID,
+			"",
+			"device_relocated",
+			actor,
+			reason,
+			now,
+		)
+		if err != nil {
 			return err
 		}
 		if err := m.UpdateDevice(device); err != nil {
 			return err
 		}
-		deployment := domain.DeviceDeployment{
-			ID:         m.NextID("deployment"),
-			DeviceID:   device.ID,
-			Room:       room,
-			Actor:      strings.TrimSpace(input.Actor),
-			Reason:     strings.TrimSpace(input.Reason),
-			RecordedAt: s.now(),
-		}
 		if err := m.AppendDeployment(deployment); err != nil {
 			return err
 		}
-		result = contracts.DeviceDeploymentResponse{Device: device, Deployment: deployment}
-		return nil
-	})
-	if err != nil {
-		return contracts.DeviceDeploymentResponse{}, err
-	}
-	err = s.repository.Mutate(ctx, func(m *repository.Mutation) error {
-		actor := strings.TrimSpace(input.Actor)
-		reason := strings.TrimSpace(input.Reason)
-		if actor == "" || reason == "" {
-			return fmt.Errorf("%w: actor and reason are required", domain.ErrInvalidInput)
-		}
-		event, err := domain.NewAuditEvent(
-			m.NextID("event"),
-			"device",
-			id,
-			"",
-			"device_relocated",
-			actor,
-			reason,
-			s.now(),
-		)
-		if err != nil {
-			return err
-		}
 		m.AppendEvent(event)
+		result = contracts.DeviceDeploymentResponse{Device: device, Deployment: deployment}
 		return nil
 	})
 	if err != nil {
@@ -242,10 +240,14 @@ func (s *Service) RecordMeasurement(ctx context.Context, caseID string, input co
 		if !exists {
 			return fmt.Errorf("%w: case %s", domain.ErrNotFound, id)
 		}
+		if item.State != domain.CaseAwaitingMeasurement {
+			return fmt.Errorf("%w: case is not awaiting measurement", domain.ErrStateConflict)
+		}
+		room := m.CurrentRoom(item.DeviceID)
 		measurement, err := domain.NewMeasurement(
 			m.NextID("measurement"),
 			item.ID,
-			m.CurrentRoom(item.DeviceID),
+			room,
 			input.Observed,
 			item.Nominal,
 			item.Tolerance,
@@ -413,15 +415,13 @@ func caseResponse(m *repository.Mutation, item domain.VerificationCase) contract
 }
 
 func caseResponseFromSnapshot(snapshot repository.Snapshot, item domain.VerificationCase) contracts.CaseResponse {
+	// Measurements are returned exactly as recorded. Each measurement pins the
+	// device room in effect at its own submission time; later relocations must
+	// not rewrite recorded or sealed evidence.
 	result := contracts.CaseResponse{
 		Case:         item,
 		Measurements: snapshot.Measurements(item.ID),
 		Events:       snapshot.Events(item.ID),
-	}
-	if device, exists := snapshot.Device(item.DeviceID); exists {
-		for index := range result.Measurements {
-			result.Measurements[index].Room = device.Room
-		}
 	}
 	if seal, exists := snapshot.Seal(item.ID); exists {
 		result.Seal = &seal
